@@ -14,6 +14,8 @@ main() {
 		git:branch:cached    red
 		git:action           yellow
 		git:dirty            218
+		jj:rev               242
+		jj:bookmark          242
 		host                 242
 		node_version         green
 		path                 blue
@@ -31,7 +33,7 @@ main() {
 	local output
 	output=$(prompt_pure_preview 2>&1)
 
-	for component in prefix suffix zaphod heartofgold "~/dev/pure" "main" "rebase-i" "42s" "venv" "prompt after error" "continuation prompt" "root" "branch color when data is cached"; do
+	for component in prefix suffix zaphod heartofgold "~/dev/pure" "main" "rebase-i" "42s" "venv" "prompt after error" "continuation prompt" "root" "branch color when data is cached" "ptvkokmn" "main@origin+2"; do
 		if [[ $output != *"$component"* ]]; then
 			print -u2 "Missing component in preview output: $component"
 			return 1

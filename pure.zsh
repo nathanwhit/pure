@@ -214,6 +214,19 @@ prompt_pure_preprompt_render() {
 		prompt_pure_precustom
 	fi
 
+	# psvar[24]: jj revision (change ID), psvar[25]: nearest ancestor bookmark with its distance.
+	psvar[24]=
+	psvar[25]=
+	if [[ $prompt_pure_vcs_info[vcs] == jj ]]; then
+		psvar[24]=${prompt_pure_vcs_info[jj_rev]}
+		local jj_bookmark=${prompt_pure_vcs_info[jj_bookmark]}
+		if [[ -n $jj_bookmark ]]; then
+			local jj_distance=${prompt_pure_vcs_info[jj_distance]:-0}
+			(( jj_distance > 0 )) && jj_bookmark+="+${jj_distance}"
+			psvar[25]=$jj_bookmark
+		fi
+	fi
+
 	# Build a fingerprint from all dynamic prompt components to detect changes
 	# without expanding PROMPT (which forks a subshell when dimmed path is on).
 	local -a prompt_fingerprint_parts=(
@@ -229,6 +242,8 @@ prompt_pure_preprompt_render() {
 		"${psvar[21]}"
 		"${psvar[22]}"
 		"${psvar[23]}"
+		"${psvar[24]}"
+		"${psvar[25]}"
 		"${prompt_pure_state[prompt]}"
 		"${prompt_pure_git_branch_color}"
 		"${PWD}"
@@ -337,27 +352,101 @@ prompt_pure_async_vcs_info() {
 	setopt localoptions noshwordsplit
 	prompt_pure_async_print_generation
 
-	# Configure `vcs_info` inside an async task. This frees up `vcs_info`
-	# to be used or configured as the user pleases.
-	# The worker is a copy of the shell, so first delete the user's styles in it. Their `vcs_info` formats, hooks, and extra checks would change the messages or run slow Git commands. Pure's own jobs get their settings as arguments.
-	zstyle -d
-	zstyle ':vcs_info:*' enable git
-	zstyle ':vcs_info:*' use-simple true
-	# Only export three message variables from `vcs_info`.
-	zstyle ':vcs_info:*' max-exports 3
-	# Export branch (%b), Git toplevel (%R), action (rebase/cherry-pick) (%a)
-	zstyle ':vcs_info:git*' formats '%b' '%R' '%a'
-	zstyle ':vcs_info:git*' actionformats '%b' '%R' '%a'
-
-	vcs_info
+	# Integration is controlled by the `:prompt:pure:git` and `:prompt:pure:jj` styles.
+	local git_enabled=${1:-1} jj_enabled=${2:-1}
 
 	local -A info
 	info[pwd]=$PWD
-	# No `%` escaping needed, the branch is rendered literally through `%14v`.
-	info[branch]=$vcs_info_msg_0_
-	info[top]=$vcs_info_msg_1_
-	info[action]=$vcs_info_msg_2_
 
+	local jj_info
+	if (( jj_enabled )) && jj_info=$(prompt_pure_async_jj_info); then
+		# jj takes precedence over Git: in a colocated repository the Git branch is not what jj tracks, and jj works without Git.
+		info=("${(@kv)info}" "${(@Q@)${(z)jj_info}}")
+	elif (( git_enabled )); then
+		# Configure `vcs_info` inside an async task. This frees up `vcs_info`
+		# to be used or configured as the user pleases.
+		# The worker is a copy of the shell, so first delete the user's styles in it. Their `vcs_info` formats, hooks, and extra checks would change the messages or run slow Git commands. Pure's own jobs get their settings as arguments.
+		zstyle -d
+		zstyle ':vcs_info:*' enable git
+		zstyle ':vcs_info:*' use-simple true
+		# Only export three message variables from `vcs_info`.
+		zstyle ':vcs_info:*' max-exports 3
+		# Export branch (%b), Git toplevel (%R), action (rebase/cherry-pick) (%a)
+		zstyle ':vcs_info:git*' formats '%b' '%R' '%a'
+		zstyle ':vcs_info:git*' actionformats '%b' '%R' '%a'
+
+		vcs_info
+
+		# No `%` escaping needed, the branch is rendered literally through `%14v`.
+		info[branch]=$vcs_info_msg_0_
+		info[top]=$vcs_info_msg_1_
+		info[action]=$vcs_info_msg_2_
+	fi
+
+	print -r - ${(@kvq)info}
+}
+
+# Prints `key value` pairs describing the jj repository containing `$PWD`.
+# Returns 1 when not inside a jj repository.
+prompt_pure_async_jj_info() {
+	setopt localoptions noshwordsplit
+
+	# An explicit Git environment selects Git, even inside a jj workspace.
+	[[ -n ${GIT_DIR-} ]] && return 1
+
+	local root=$PWD
+	while [[ $root != / ]]; do
+		[[ -d $root/.jj ]] && break
+		# A nested Git repository closer than the jj workspace wins, for example a submodule.
+		[[ -e $root/.git ]] && return 1
+		root=${root:h}
+	done
+	[[ -d $root/.jj ]] || return 1
+	(( $+commands[jj] )) || return 1
+
+	# `@` plus the nearest bookmarked ancestors: `heads()` drops bookmarks that are ancestors of a closer one.
+	# `--ignore-working-copy` skips the snapshot jj would otherwise take on every prompt.
+	local log
+	log=$(command jj --ignore-working-copy --color=never log --no-graph \
+		-r '@ | heads(::@ & (bookmarks() | remote_bookmarks()))' \
+		-T 'if(current_working_copy, "wc", "ancestor") ++ "\t" ++ change_id.short() ++ "\t" ++ commit_id ++ "\t" ++ bookmarks ++ "\t" ++ remote_bookmarks ++ "\n"' 2>/dev/null) || return 1
+
+	local -a fields
+	local line rev= bookmark= best_distance= name
+	local count since
+	for line in "${(@f)log}"; do
+		[[ -n $line ]] || continue
+		fields=("${(@ps:\t:)line}")
+		[[ $fields[1] == wc ]] && rev=${fields[2][1,8]}
+
+		# Prefer a local bookmark, fall back to a remote one (`name@remote`).
+		if [[ -n $fields[4] ]]; then
+			name=${fields[4]%% *}
+		elif [[ -n $fields[5] ]]; then
+			name=${fields[5]%% *}
+		else
+			continue
+		fi
+
+		count=0
+		if [[ $fields[1] != wc ]]; then
+			# Distance is the number of revisions between the bookmark and `@`, like `git rev-list --count`.
+			since=$(command jj --ignore-working-copy --color=never log --no-graph -r "${fields[3]}..@" -T '"x"' 2>/dev/null) || continue
+			count=${#since}
+		fi
+
+		if [[ -z $best_distance ]] || (( count < best_distance )); then
+			best_distance=$count
+			bookmark=$name
+		fi
+	done
+
+	local -A info
+	info[vcs]=jj
+	info[top]=$root
+	info[jj_rev]=$rev
+	info[jj_bookmark]=$bookmark
+	info[jj_distance]=$best_distance
 	print -r - ${(@kvq)info}
 }
 
@@ -535,17 +624,21 @@ prompt_pure_async_renice() {
 	fi
 }
 
-# Reset the Git info shown in the preprompt.
-prompt_pure_reset_git_info() {
+# Reset the VCS info shown in the preprompt.
+prompt_pure_reset_vcs_info() {
 	unset prompt_pure_git_dirty prompt_pure_git_last_dirty_check_timestamp prompt_pure_git_arrows prompt_pure_git_stash prompt_pure_git_fetch_pattern
 	typeset -gA prompt_pure_vcs_info
 	prompt_pure_vcs_info[branch]=
 	prompt_pure_vcs_info[top]=
 	prompt_pure_vcs_info[action]=
+	prompt_pure_vcs_info[vcs]=
+	prompt_pure_vcs_info[jj_rev]=
+	prompt_pure_vcs_info[jj_bookmark]=
+	prompt_pure_vcs_info[jj_distance]=
 }
 
 prompt_pure_clear_git_state() {
-	prompt_pure_reset_git_info
+	prompt_pure_reset_vcs_info
 	typeset -gA prompt_pure_worker_env=()
 	prompt_pure_vcs_info[pwd]=
 }
@@ -592,9 +685,12 @@ prompt_pure_async_tasks() {
 		unset prompt_pure_node_cache_key
 	fi
 
-	# Check if git integration is enabled (default: yes).
-	if ! zstyle -T ":prompt:pure:git" show; then
-		# Flush any in-flight async git jobs.
+	# Check if VCS integration is enabled (default: yes).
+	local git_enabled=1 jj_enabled=1
+	zstyle -T ":prompt:pure:git" show || git_enabled=0
+	zstyle -T ":prompt:pure:jj" show || jj_enabled=0
+	if (( ! git_enabled && ! jj_enabled )); then
+		# Flush any in-flight async VCS jobs.
 		if (( ${prompt_pure_async_inited:-0} )); then
 			async_flush_jobs "prompt_pure"
 		fi
@@ -641,7 +737,7 @@ prompt_pure_async_tasks() {
 		$working_directory_changed == 1 ||
 		$working_tree_changed == 1 ]]; then
 		# Reset preprompt variables before syncing the new working tree.
-		prompt_pure_reset_git_info
+		prompt_pure_reset_vcs_info
 	fi
 
 	if [[ $working_directory_changed == 1 ||
@@ -677,9 +773,9 @@ prompt_pure_async_tasks() {
 		fi
 	fi
 
-	async_job "prompt_pure" prompt_pure_async_vcs_info || return
+	async_job "prompt_pure" prompt_pure_async_vcs_info $git_enabled $jj_enabled || return
 
-	# Only perform tasks inside a Git working tree.
+	# Only perform tasks inside a VCS working tree.
 	[[ -n $prompt_pure_vcs_info[top] ]] || return
 
 	prompt_pure_async_refresh
@@ -687,6 +783,9 @@ prompt_pure_async_tasks() {
 
 prompt_pure_async_refresh() {
 	setopt localoptions noshwordsplit
+
+	# jj reports its own revision and bookmark; the Git checks do not apply to it.
+	[[ $prompt_pure_vcs_info[vcs] == jj ]] && return
 
 	if [[ -z $prompt_pure_git_fetch_pattern ]]; then
 		# We set the pattern here to avoid redoing the pattern check until the
@@ -827,6 +926,10 @@ prompt_pure_async_callback() {
 			prompt_pure_vcs_info[branch]=$info[branch]
 			prompt_pure_vcs_info[top]=$info[top]
 			prompt_pure_vcs_info[action]=$info[action]
+			prompt_pure_vcs_info[vcs]=$info[vcs]
+			prompt_pure_vcs_info[jj_rev]=$info[jj_rev]
+			prompt_pure_vcs_info[jj_bookmark]=$info[jj_bookmark]
+			prompt_pure_vcs_info[jj_distance]=$info[jj_distance]
 
 			# Run the async refresh tasks after the update, as they read the new top-level (for example, to skip fetching at HOME).
 			(( entered_git_directory )) && prompt_pure_async_refresh
@@ -1111,6 +1214,8 @@ prompt_pure_preview() {
 	print; print
 	print -P "%F{$c[git:branch:cached]}main%f  branch color when data is cached"
 	print; print
+	print -P "%F{$c[jj:rev]}ptvkokmn%f %F{$c[jj:bookmark]}main@origin+2%f  jj revision and nearest ancestor bookmark"
+	print; print
 	print -P "%F{$c[user:root]}root%f${host_sample}  root user"
 	print; print
 	print -P "%F{$c[prompt:continuation]}… if%f %F{$c[prompt:success]}$symbol%f  continuation prompt"
@@ -1157,6 +1262,8 @@ prompt_pure_setup() {
 		git:branch:cached    red
 		git:action           yellow
 		git:dirty            218
+		jj:rev               242
+		jj:bookmark          242
 		host                 242
 		node_version         green
 		path                 blue
@@ -1206,6 +1313,8 @@ prompt_pure_setup() {
 	#   psvar[21] = Node.js version (e.g. ⬢22)
 	#   psvar[22] = custom prefix (set by prompt_pure_precustom)
 	#   psvar[23] = custom suffix (set by prompt_pure_precustom)
+	#   psvar[24] = jj revision (change ID)
+	#   psvar[25] = jj nearest ancestor bookmark (e.g. main@origin+2)
 	#
 	# Example output:
 	#   prefix ✦ user@host ~/Code/pure main* rebase ⇣⇡ ≡ ⬢22 3s suffix
@@ -1222,6 +1331,7 @@ prompt_pure_setup() {
 	prompt_pure_set_path_separator
 	PROMPT+='${${prompt_pure_path_separator_dimmed:+$(prompt_pure_render_dimmed_path)}:-${prompt_pure_path_segment}}'
 	PROMPT+='%(14V. %F{${prompt_pure_git_branch_color}}%14v%(15V.%F{$prompt_pure_colors[git:dirty]}%15v.)%f.)'
+	PROMPT+='%(24V. %F{$prompt_pure_colors[jj:rev]}%24v%f%(25V. %F{$prompt_pure_colors[jj:bookmark]}%25v%f.).)'
 	PROMPT+='%(16V. %F{$prompt_pure_colors[git:action]}%16v%f.)'
 	PROMPT+='%(17V. %F{$prompt_pure_colors[git:arrow]}%17v%f.)'
 	PROMPT+='%(18V. %F{$prompt_pure_colors[git:stash]}%18v%f.)'

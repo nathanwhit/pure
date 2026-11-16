@@ -14,6 +14,7 @@ Most prompts are cluttered, ugly and slow. We wanted something visually pleasing
   Author went through the whole Unicode range to find it.
 - Shows `git` branch and whether it's dirty (with a `*`).
 - Indicates when you have unpushed/unpulled `git` commits with up/down arrows. *(Check is done asynchronously!)*
+- Shows the `jj` revision and the nearest ancestor bookmark with the distance from it (for example `main@origin+2`) in a [Jujutsu](https://jj-vcs.dev) repository.
 - Prompt character turns red if the last command didn't exit with `0`.
 - Command execution time will be displayed if it exceeds the set threshold.
 - Username and host only displayed when in an SSH session or a container.
@@ -121,6 +122,12 @@ Git integration is enabled by default, you can disable it with:
 
 `zstyle :prompt:pure:git show no`
 
+Jujutsu integration is enabled by default when `jj` is installed and the current directory is in a jj repository. You can disable it with:
+
+`zstyle :prompt:pure:jj show no`
+
+In a colocated repository, jj takes precedence over Git, and the Git-only checks (dirty marker, arrows, and stash) are skipped.
+
 Detailed dirty indicators differentiate between unstaged (`*`), staged (`+`), and untracked (`?`) changes instead of showing a single `*`. It is not enabled by default. You can enable it with:
 
 `zstyle :prompt:pure:git:dirty detailed yes`
@@ -186,6 +193,8 @@ Colors can be changed by using [`zstyle`](http://zsh.sourceforge.net/Doc/Release
 - `git:branch:cached` (red) - The name of the current branch when the data isn't fresh.
 - `git:action` (yellow) - The current action in progress (cherry-pick, rebase, etc.) when in a Git repository.
 - `git:dirty` (218) - The asterisk showing the branch is dirty.
+- `jj:rev` (242) - The change ID of the working-copy revision when in a jj repository.
+- `jj:bookmark` (242) - The nearest ancestor bookmark and the distance from it, for example `main@origin+2`.
 - `host` (242) - The hostname when on a remote machine.
 - `node_version` (green) - The current major Node.js version in directories with `package.json`.
 - `path` (blue) - The current path, for example, `PWD`.
@@ -220,6 +229,8 @@ venv ❯
 │    └───────────────────────────────────────────────────────────────────── prompt
 └────────────────────────────────────────────────────────────────────────── virtualenv (or prompt:continuation)
 ```
+
+In a jj repository, the `jj:rev` and `jj:bookmark` segments replace the `git:*` segments.
 
 ### Preview
 
@@ -270,13 +281,14 @@ To have commands colorized as seen in the screenshot, install [zsh-syntax-highli
 
 ### AI coding agents
 
-Most AI coding agents (Claude Code, Codex, …) run commands in a non-interactive shell where Pure's prompt never renders, so its git work never runs there anyway. Agents that render the prompt in an interactive terminal do run it, but you can skip it since `git fetch` can stall in a sandbox and no human sees the prompt. You can gate git integration on the agent marker environment variables in your `.zshrc`:
+Most AI coding agents (Claude Code, Codex, …) run commands in a non-interactive shell where Pure's prompt never renders, so its VCS work never runs there anyway. Agents that render the prompt in an interactive terminal do run it, but you can skip it since `git fetch` can stall in a sandbox and no human sees the prompt. You can gate VCS integration on the agent marker environment variables in your `.zshrc`:
 
 ```zsh
 # Just an example. Add whichever markers apply to the agents you use.
 # Pull requests to expand this list will not be accepted.
 if [[ -n $AI_AGENT$CLAUDECODE$CURSOR_AGENT$GEMINI_CLI$OPENCODE ]]; then
 	zstyle :prompt:pure:git show no
+	zstyle :prompt:pure:jj show no
 fi
 ```
 
